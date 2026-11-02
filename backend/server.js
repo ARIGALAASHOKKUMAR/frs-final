@@ -5,6 +5,8 @@ const faceapi = require("face-api.js");
 const canvas = require("canvas");
 const fs = require("fs");
 const path = require("path");
+const { pool, initializeDatabase } = require("./db");
+const auth = require("./auth");
 
 const app = express();
 const PORT = 3001;
@@ -12,6 +14,16 @@ const PORT = 3001;
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
+
+app.post("/api/auth/login", auth.login);
+app.post("/api/auth/logout", auth.requireAuth, async (req, res) => {
+  await pool.query("DELETE FROM auth_sessions WHERE token=$1", [req.sessionToken]);
+  res.json({ success: true });
+});
+app.use("/api/attendance", require("./attendanceRoutes"));
+app.use("/api/leaves", require("./leaveRoutes"));
+app.use("/api/employees", require("./employeeRoutes"));
+app.use("/api/profile", require("./profileRoutes"));
 
 // Face API canvas configuration
 const { Canvas, Image, ImageData } = canvas;
@@ -128,14 +140,15 @@ async function getFaceDescriptor(buffer) {
   return Array.from(detection.descriptor);
 }
 
-// Save registered face
-function saveFaceData(data) {
-  fs.writeFileSync(
-    DATA_FILE,
-    JSON.stringify(data, null, 2),
-    "utf8"
+// Store descriptors per employee; the comparison math remains unchanged.
+async function saveFaceData(employeeId, data) {
+  await pool.query(
+    `INSERT INTO face_templates (employee_id, descriptor, registered_at)
+     VALUES ($1, $2::DOUBLE PRECISION[], $3)
+     ON CONFLICT (employee_id) DO UPDATE
+       SET descriptor = EXCLUDED.descriptor, registered_at = EXCLUDED.registered_at`,
+    [employeeId, data.descriptor, data.registeredAt]
   );
-
   registeredFace = data;
 }
 
@@ -165,9 +178,23 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/api/face/status", auth.requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT registered_at AS \"registeredAt\" FROM face_templates WHERE employee_id = $1",
+      [req.employeeId]
+    );
+    res.json({ success: true, registered: rows.length > 0, registeredAt: rows[0]?.registeredAt || null });
+  } catch (error) {
+    console.error("Face status error:", error.message);
+    res.status(500).json({ success: false, message: "Unable to load face registration status." });
+  }
+});
+
 // API 1: Register Face
 app.post(
   "/api/face/register",
+  auth.requireAuth,
   checkModels,
   async (req, res) => {
     try {
@@ -180,7 +207,7 @@ app.post(
         registeredAt: new Date().toISOString(),
       };
 
-      saveFaceData(faceData);
+      await saveFaceData(req.employeeId, faceData);
 
       return res.status(200).json({
         success: true,
@@ -202,10 +229,15 @@ app.post(
 // API 2: Compare Face
 app.post(
   "/api/face/compare",
+  auth.requireAuth,
   checkModels,
   async (req, res) => {
     try {
-      if (!registeredFace) {
+      const { rows } = await pool.query(
+        "SELECT descriptor FROM face_templates WHERE employee_id = $1",
+        [req.employeeId]
+      );
+      if (!rows.length) {
         return res.status(400).json({
           success: false,
           matched: false,
@@ -219,7 +251,7 @@ app.post(
         await getFaceDescriptor(imageBuffer);
 
       const distance = faceapi.euclideanDistance(
-        registeredFace.descriptor,
+        rows[0].descriptor,
         capturedDescriptor
       );
 
@@ -263,6 +295,7 @@ app.use((err, req, res, next) => {
 async function startServer() {
   try {
     await loadModels();
+    await initializeDatabase();
 
     app.listen(PORT, "0.0.0.0", () => {
       console.log("----------------------------------");

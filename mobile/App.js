@@ -2,34 +2,47 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
-  TextInput,
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
   Alert,
   ScrollView,
-  Modal,
   Linking,
+  StatusBar,
 } from "react-native";
 import {
   SafeAreaProvider,
   SafeAreaView,
 } from "react-native-safe-area-context";
-import { CameraView, useCameraPermissions } from "expo-camera";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useCameraPermissions } from "expo-camera";
+import { Ionicons } from "@expo/vector-icons";
 
-const API_URL = "http://192.168.240.173:3001";
+import Login from "./components/Login";
+import FrsReport from "./components/FrsReport";
+import FrsHistory from "./components/FrsHistory";
+import FaceRecognition from "./components/FaceRecognition";
+import Sidebar from "./components/Sidebar";
+import LeaveHistory from "./components/LeaveHistory";
+import ApplyLeaves from "./components/ApplyLeaves";
+import Profile from "./components/Profile";
+import AdminDashboard from "./components/AdminDashboard";
+import EmployeeManagement from "./components/EmployeeManagement";
+import AdminLeaveApprovals from "./components/AdminLeaveApprovals";
+import Splash from "./components/Splash";
+import { API_URL, apiRequest, clearSession, getSavedEmployee, getSessionToken } from "./components/api";
 
-const EMPLOYEE = {
-  id: "EMP001",
-  name: "Demo Employee",
-  username: "employee",
-  password: "123456",
+const EMPLOYEE = { id: "EMP001", name: "Demo Employee" };
+
+const BRAND = {
+  green: "#075b38",
+  greenLight: "#0d7a4c",
+  mint: "#d1fae5",
+  mintSoft: "#f0fdf4",
+  bg: "#f4f7f5",
+  text: "#0f172a",
+  muted: "#6b7280",
+  danger: "#dc2626",
 };
-
-const STORAGE_KEY = `attendance_v1_${EMPLOYEE.id}`;
-
-//changes
 
 // Uses the phone's local calendar date.
 function dateKey(value = new Date()) {
@@ -39,6 +52,21 @@ function dateKey(value = new Date()) {
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0"),
   ].join("-");
+}
+
+function normalizeAttendanceRecord(record) {
+  const clockIn = record.clockIn ?? record.clock_in ?? record.clockin;
+  const clockOut = record.clockOut ?? record.clock_out ?? record.clockout ?? null;
+  if (!clockIn || !Number.isFinite(Date.parse(clockIn))) {
+    throw new Error("Attendance record is missing a valid clock-in time.");
+  }
+  return {
+    ...record,
+    id: String(record.id),
+    date: dateKey(new Date(clockIn)),
+    clockIn: new Date(clockIn).toISOString(),
+    clockOut: clockOut ? new Date(clockOut).toISOString() : null,
+  };
 }
 
 function formatTime(value) {
@@ -63,12 +91,10 @@ function duration(record, now) {
   const end = record.clockOut
     ? new Date(record.clockOut).getTime()
     : now.getTime();
-
   const minutes = Math.max(
     0,
     Math.floor((end - new Date(record.clockIn).getTime()) / 60000)
   );
-
   return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
 }
 
@@ -77,7 +103,7 @@ function Button({ title, onPress, disabled, secondary, danger }) {
     <TouchableOpacity
       onPress={onPress}
       disabled={disabled}
-      activeOpacity={0.8}
+      activeOpacity={0.85}
       style={[
         styles.button,
         secondary && styles.secondaryButton,
@@ -100,6 +126,7 @@ function Button({ title, onPress, disabled, secondary, danger }) {
 export default function App() {
   return (
     <SafeAreaProvider>
+      <StatusBar barStyle="light-content" backgroundColor={BRAND.green} />
       <AttendanceApp />
     </SafeAreaProvider>
   );
@@ -111,36 +138,80 @@ function AttendanceApp() {
 
   const [permission, requestPermission] = useCameraPermissions();
 
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [loggedIn, setLoggedIn] = useState(false);
+  const [showSplash, setShowSplash] = useState(true);
+  const [employee, setEmployee] = useState(EMPLOYEE);
+  const [faceStatus, setFaceStatus] = useState("unknown");
+  const [leaveRefresh, setLeaveRefresh] = useState(0);
 
   const [records, setRecords] = useState([]);
   const [storageReady, setStorageReady] = useState(false);
   const [storageError, setStorageError] = useState("");
 
   const [tab, setTab] = useState("home");
+  const [sidebarVisible, setSidebarVisible] = useState(false);
   const [now, setNow] = useState(new Date());
 
-  // null | register | clockIn | clockOut
   const [action, setAction] = useState(null);
   const [cameraReady, setCameraReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const faceRegistered = faceStatus === "registered";
 
   useEffect(() => {
-    loadHistory();
+    const splashTimer = setTimeout(() => setShowSplash(false), 1400);
     const timer = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(timer);
+    let active = true;
+    async function restoreSession() {
+      try {
+        const [token, savedEmployee] = await Promise.all([getSessionToken(), getSavedEmployee()]);
+        if (!active || !token || !savedEmployee) return;
+        setEmployee(savedEmployee);
+        setLoggedIn(true);
+        if (savedEmployee.role === "admin") {
+          setStorageReady(true);
+          setTab("admin-home");
+        } else {
+          setStorageReady(false);
+          setFaceStatus("loading");
+          loadHistory();
+          refreshFaceStatus();
+        }
+      } catch (error) {
+        console.warn("Could not restore saved session:", error.message);
+      }
+    }
+    restoreSession();
+    return () => {
+      active = false;
+      clearTimeout(splashTimer);
+      clearInterval(timer);
+    };
   }, []);
+
+  async function refreshFaceStatus() {
+    setFaceStatus("loading");
+    try {
+      const status = await apiRequest("/api/face/status");
+      setFaceStatus(status.registered === true ? "registered" : "unregistered");
+    } catch (error) {
+      console.warn("Face registration status request failed:", error.message);
+      if (error.status === 401) {
+        await clearSession();
+        setLoggedIn(false);
+        Alert.alert("Session expired", "Please sign in again to check your saved face registration.");
+        return;
+      }
+      setFaceStatus("error");
+    }
+  }
 
   async function loadHistory() {
     setStorageReady(false);
     setStorageError("");
-
     try {
-      const saved = await AsyncStorage.getItem(STORAGE_KEY);
-      const parsed = saved ? JSON.parse(saved) : [];
+      const response = await apiRequest("/api/attendance");
+      const parsed = response.records.map(normalizeAttendanceRecord);
 
       const valid =
         Array.isArray(parsed) &&
@@ -154,81 +225,61 @@ function AttendanceApp() {
               Number.isFinite(Date.parse(record.clockOut)))
         );
 
-      if (!valid) {
-        throw new Error("Stored attendance history could not be read.");
-      }
+      if (!valid) throw new Error("Stored attendance history could not be read.");
 
       setRecords(parsed);
       setStorageReady(true);
     } catch (error) {
-      setStorageError(
-        error.message || "Unable to load attendance history."
-      );
+      setStorageError(error.message || "Unable to load attendance history.");
     }
   }
 
   const today = records.find((record) => record.date === dateKey(now));
   const activeRecord = records.find((record) => !record.clockOut);
-
-  // An unfinished shift stays available for checkout after midnight.
   const displayedRecord = activeRecord || today;
 
-  const canClockIn = storageReady && !activeRecord && !today;
-  const canClockOut = storageReady && Boolean(activeRecord);
+  const canClockIn = storageReady && faceRegistered && !activeRecord && !today;
+  const canClockOut = storageReady && faceRegistered && Boolean(activeRecord);
 
-  function login() {
-    if (
-      username.trim() === EMPLOYEE.username &&
-      password === EMPLOYEE.password
-    ) {
-      setLoggedIn(true);
-      setPassword("");
+  const logout = async () => {
+    if (busyRef.current) return;
+    try {
+      await apiRequest("/api/auth/logout", { method: "POST" }).catch(() => {});
+      await clearSession();
+      setRecords([]);
+      setAction(null);
+      setLoggedIn(false);
       setTab("home");
+      setSidebarVisible(false);
+      setFaceStatus("unknown");
       setMessage("");
+      Alert.alert("Logout", "You have been signed out.");
+    } catch (error) {
+      Alert.alert(
+        "Logout failed",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  };
+
+  async function openCamera(nextAction) {
+    if (busyRef.current || !storageReady) return;
+
+    if ((nextAction === "clockIn" || nextAction === "clockOut") && faceStatus !== "registered" && faceStatus !== "unregistered") {
+      Alert.alert("Unable to check face registration", "Retry the registration status check before clocking attendance.");
+      refreshFaceStatus();
       return;
     }
 
-    Alert.alert(
-      "Invalid login",
-      "Use username: employee\nPassword: 123456"
-    );
-  }
-
-  const logout = async () => {
-  if (busyRef.current) return;
-
-  try {
-    await AsyncStorage.removeItem(STORAGE_KEY);
-
-    setRecords([]);
-    setAction(null);
-    setLoggedIn(false);
-    setTab("home");
-    setUsername("");
-    setPassword("");
-    setMessage("");
-
-    Alert.alert(
-      "Logout",
-      "Logged out and attendance history cleared."
-    );
-  } catch (error) {
-    console.log("Logout error:", error);
-
-    Alert.alert(
-      "Logout failed",
-      error instanceof Error ? error.message : String(error)
-    );
-  }
-};
-  async function openCamera(nextAction) {
-    if (busyRef.current || !storageReady) return;
+    if ((nextAction === "clockIn" || nextAction === "clockOut") && !faceRegistered) {
+      Alert.alert("Face registration required", "Register your face before clocking in or out.");
+      return;
+    }
 
     if (nextAction === "clockIn" && !canClockIn) {
       Alert.alert("Attendance", "Clock-in is not available.");
       return;
     }
-
     if (nextAction === "clockOut" && !canClockOut) {
       Alert.alert("Attendance", "Please clock in first.");
       return;
@@ -245,10 +296,7 @@ function AttendanceApp() {
           "Allow camera access to register or verify your face.",
           [
             { text: "Cancel", style: "cancel" },
-            {
-              text: "Open settings",
-              onPress: () => Linking.openSettings(),
-            },
+            { text: "Open settings", onPress: () => Linking.openSettings() },
           ]
         );
         return;
@@ -269,9 +317,7 @@ function AttendanceApp() {
   }
 
   async function captureAndSubmit() {
-    if (busyRef.current || !cameraReady || !cameraRef.current || !action) {
-      return;
-    }
+    if (busyRef.current || !cameraReady || !cameraRef.current || !action) return;
 
     busyRef.current = true;
     setBusy(true);
@@ -285,28 +331,26 @@ function AttendanceApp() {
         base64: true,
       });
 
-      if (!image?.base64) {
+      if (!image?.base64)
         throw new Error("Unable to capture image. Please try again.");
-      }
 
-      const endpoint =
-        currentAction === "register" ? "register" : "compare";
-
+      const endpoint = currentAction === "register" ? "register" : "compare";
       const controller = new AbortController();
       timeout = setTimeout(() => controller.abort(), 30000);
+      const token = await getSessionToken();
 
       const response = await fetch(`${API_URL}/api/face/${endpoint}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ image: image.base64 }),
         signal: controller.signal,
       });
 
       let data;
-
       try {
         data = await response.json();
       } catch (error) {
@@ -319,6 +363,7 @@ function AttendanceApp() {
       }
 
       if (currentAction === "register") {
+        setFaceStatus("registered");
         setMessage("Face registered successfully.");
         setAction(null);
         Alert.alert(
@@ -328,7 +373,6 @@ function AttendanceApp() {
         return;
       }
 
-      // HTTP success alone does NOT mean the face matched.
       if (data?.matched !== true) {
         const text = "Face did not match. Attendance was not recorded.";
         setMessage(text);
@@ -336,75 +380,37 @@ function AttendanceApp() {
         return;
       }
 
-      // Record the time only after successful verification.
       const verifiedAt = new Date();
-      const timestamp = verifiedAt.toISOString();
-      let updatedRecords;
-
-      if (currentAction === "clockIn") {
-        const alreadyOpen = records.some((record) => !record.clockOut);
-        const alreadyToday = records.some(
-          (record) => record.date === dateKey(verifiedAt)
-        );
-
-        if (alreadyOpen || alreadyToday) {
-          throw new Error("You have already clocked in.");
-        }
-
-        updatedRecords = [
-          {
-            id: `${EMPLOYEE.id}-${verifiedAt.getTime()}`,
-            date: dateKey(verifiedAt),
-            clockIn: timestamp,
-            clockOut: null,
-          },
-          ...records,
-        ];
-      } else {
-        const openRecord = records.find((record) => !record.clockOut);
-
-        if (!openRecord) {
-          throw new Error("No active clock-in was found.");
-        }
-
-        if (verifiedAt.getTime() < Date.parse(openRecord.clockIn)) {
-          throw new Error("Please correct your phone's date and time.");
-        }
-
-        updatedRecords = records.map((record) =>
-          record.id === openRecord.id
-            ? { ...record, clockOut: timestamp }
-            : record
-        );
-      }
-
-      // Show success only after local persistence succeeds.
-      try {
-        await AsyncStorage.setItem(
-          STORAGE_KEY,
-          JSON.stringify(updatedRecords)
-        );
-      } catch {
-        throw new Error(
-          "Face matched, but attendance could not be saved. Please retry."
-        );
-      }
-
+      const attendance = await apiRequest(
+        `/api/attendance/${
+          currentAction === "clockIn" ? "clock-in" : "clock-out"
+        }`,
+        { method: "POST", body: "{}" }
+      );
+      const saved = attendance.record;
+      const updatedRecord = normalizeAttendanceRecord(saved);
+      const updatedRecords =
+        currentAction === "clockIn"
+          ? [updatedRecord, ...records]
+          : records.map((record) =>
+              record.id === updatedRecord.id ? updatedRecord : record
+            );
       setRecords(updatedRecords);
       setNow(verifiedAt);
       setAction(null);
 
       const label = currentAction === "clockIn" ? "Clock-in" : "Clock-out";
-      const text = `Face matched! ${label} recorded at ${formatTime(timestamp)}.`;
-
+      const text = `Face matched! ${label}`;
       setMessage(text);
       Alert.alert(`${label} successful`, text);
     } catch (error) {
+      if (/already have an active clock-in|already been recorded today/i.test(error.message || "")) {
+        await loadHistory();
+      }
       const text =
         error.name === "AbortError"
           ? "The face API timed out. Please try again."
           : error.message || "Unable to connect to the backend.";
-
       setMessage(text);
       Alert.alert("Unable to complete action", text);
     } finally {
@@ -414,301 +420,313 @@ function AttendanceApp() {
     }
   }
 
+  if (showSplash) return <Splash />;
+
   if (!loggedIn) {
+    const onLogin = async (account) => {
+      setEmployee(account);
+      setLoggedIn(true);
+      setStorageError("");
+      if (account.role === "admin") {
+        setRecords([]);
+        setStorageReady(true);
+        setFaceStatus("unknown");
+        setTab("admin-home");
+      } else {
+        setStorageReady(false);
+        setTab("home");
+        setFaceStatus("loading");
+        loadHistory();
+        refreshFaceStatus();
+      }
+    };
     return (
       <SafeAreaView style={styles.screen}>
-        <ScrollView contentContainerStyle={styles.loginContainer}>
-          <View style={styles.logo}>
-            <Text style={styles.logoText}>FA</Text>
-          </View>
-
-          <Text style={styles.title}>Face Attendance</Text>
-          <Text style={styles.subtitle}>
-            Sign in to mark your office attendance
-          </Text>
-
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Employee login</Text>
-
-            <Text style={styles.label}>Username</Text>
-            <TextInput
-              style={styles.input}
-              value={username}
-              onChangeText={setUsername}
-              placeholder="Enter username"
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-
-            <Text style={styles.label}>Password</Text>
-            <TextInput
-              style={styles.input}
-              value={password}
-              onChangeText={setPassword}
-              placeholder="Enter password"
-              secureTextEntry
-              onSubmitEditing={login}
-            />
-
-            <Button title="Login" onPress={login} />
-            <Text style={styles.demo}>
-              Demo login: employee / 123456
-            </Text>
-          </View>
-        </ScrollView>
+        <Login onLogin={onLogin} />
       </SafeAreaView>
     );
   }
 
-  const cameraTitle =
-    action === "register"
-      ? "Register Face"
-      : action === "clockIn"
-      ? "Verify Face to Clock In"
-      : "Verify Face to Clock Out";
+  const selectTab = (key) => {
+    setTab(key);
+    setSidebarVisible(false);
+  };
+
+  const displayName = employee?.name || EMPLOYEE.name;
+  const initials = displayName
+    .split(" ")
+    .map((n) => n[0])
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
 
   return (
-    <SafeAreaView style={styles.screen}>
+    <SafeAreaView style={styles.screen} edges={["top", "left", "right"]}>
+      {/* Header */}
       <View style={styles.header}>
-        <View>
-          <Text style={styles.headerTitle}>Face Attendance</Text>
-          <Text style={styles.subtitle}>{EMPLOYEE.id}</Text>
-        </View>
-        <TouchableOpacity onPress={logout}>
-          <Text style={styles.logout}>Logout</Text>
-        </TouchableOpacity>
-      </View>
-
-      <View style={styles.tabs}>
-        {["home", "history"].map((item) => (
-          <TouchableOpacity
-            key={item}
-            style={[styles.tab, tab === item && styles.activeTab]}
-            onPress={() => setTab(item)}
-          >
-            <Text
-              style={[
-                styles.tabText,
-                tab === item && styles.activeTabText,
-              ]}
-            >
-              {item === "home" ? "Home" : "History"}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      <ScrollView contentContainerStyle={styles.content}>
-        {storageError ? (
-          <View style={styles.card}>
-            <Text style={styles.error}>{storageError}</Text>
-            <Button title="Retry loading history" onPress={loadHistory} />
+        <View style={styles.headerLeft}>
+          <View style={styles.brandMark}>
+            <Ionicons name="leaf" size={20} color="#fff" />
           </View>
-        ) : !storageReady ? (
-          <ActivityIndicator size="large" color="#2563eb" />
-        ) : tab === "home" ? (
-          <>
-            <Text style={styles.welcome}>Hello, {EMPLOYEE.name}</Text>
-            <Text style={styles.subtitle}>{formatDate(now)}</Text>
-
-            <View style={styles.clockCard}>
-              <Text style={styles.clockLabel}>CURRENT TIME</Text>
-              <Text style={styles.clock}>{formatTime(now)}</Text>
-              <Text style={styles.clockStatus}>
-                {activeRecord
-                  ? "You are clocked in"
-                  : today?.clockOut
-                  ? "Attendance completed"
-                  : "Ready to start your day"}
-              </Text>
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>
-                {activeRecord && activeRecord.date !== dateKey(now)
-                  ? `Open shift · ${formatDate(activeRecord.clockIn)}`
-                  : "Today's attendance"}
-              </Text>
-
-              <View style={styles.timeRow}>
-                <View style={styles.timeColumn}>
-                  <Text style={styles.label}>Clock in</Text>
-                  <Text style={styles.timeValue}>
-                    {formatTime(displayedRecord?.clockIn)}
-                  </Text>
-                </View>
-
-                <View style={styles.timeColumn}>
-                  <Text style={styles.label}>Clock out</Text>
-                  <Text style={styles.timeValue}>
-                    {formatTime(displayedRecord?.clockOut)}
-                  </Text>
-                </View>
-              </View>
-
-              <Text style={styles.duration}>
-                Duration: {duration(displayedRecord, now)}
-              </Text>
-
-              <Button
-                title="Clock In"
-                onPress={() => openCamera("clockIn")}
-                disabled={!canClockIn || busy}
-              />
-              <Button
-                title="Clock Out"
-                onPress={() => openCamera("clockOut")}
-                disabled={!canClockOut || busy}
-                danger
-              />
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>Face registration</Text>
-              <Text style={styles.subtitle}>
-                Register your face before marking attendance.
-              </Text>
-              <Button
-                title="Register / Re-register Face"
-                onPress={() => openCamera("register")}
-                disabled={busy}
-                secondary
-              />
-            </View>
-
-            {!!message && (
-              <View style={styles.messageBox}>
-                <Text style={styles.messageText}>{message}</Text>
-              </View>
-            )}
-          </>
-        ) : (
-          <>
-            <Text style={styles.welcome}>Attendance history</Text>
-            <Text style={styles.subtitle}>
-              {records.length} attendance record(s)
+          <View style={{ flex: 1 }}>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              AP Forest Department
             </Text>
+            <Text style={styles.headerSub} numberOfLines={1}>
+              {employee?.id || EMPLOYEE.id} · {displayName.split(" ")[0]}
+            </Text>
+          </View>
+        </View>
 
-            {records.length === 0 ? (
-              <View style={styles.card}>
-                <Text style={styles.subtitle}>
-                  No attendance yet. Your first clock-in will appear here.
-                </Text>
-              </View>
-            ) : (
-              records.map((record) => (
-                <View key={record.id} style={styles.card}>
-                  <View style={styles.historyHeader}>
-                    <Text style={styles.cardTitle}>
-                      {formatDate(record.clockIn)}
-                    </Text>
-                    <Text
-                      style={[
-                        styles.badge,
-                        !record.clockOut && styles.activeBadge,
-                      ]}
-                    >
-                      {record.clockOut ? "Completed" : "Active"}
-                    </Text>
-                  </View>
+        <View style={styles.headerRight}>
+          <View style={styles.avatarMini}>
+            <Text style={styles.avatarMiniText}>{initials}</Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => setSidebarVisible(true)}
+            activeOpacity={0.7}
+            style={styles.logoutBtn}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="menu" size={22} color="#fff" />
+          </TouchableOpacity>
+        </View>
+      </View>
 
-                  <Text style={styles.historyLine}>
-                    Clock in: {formatTime(record.clockIn)}
-                  </Text>
-                  <Text style={styles.historyLine}>
-                    Clock out: {formatTime(record.clockOut)}
-                    {record.clockOut &&
-                    dateKey(record.clockOut) !== record.date
-                      ? ` (${formatDate(record.clockOut)})`
-                      : ""}
-                  </Text>
-                  <Text style={styles.duration}>
-                    Duration: {duration(record, now)}
-                  </Text>
-                </View>
-              ))
-            )}
-          </>
-        )}
-      </ScrollView>
+      {/* Content */}
+      {employee?.role === "admin" ? (
+        tab === "admin-home" ? (
+          <AdminDashboard onEmployees={() => selectTab("employees")} onLeaves={() => selectTab("leave-approvals")} />
+        ) : tab === "employees" ? (
+          <EmployeeManagement />
+        ) : tab === "leave-approvals" ? (
+          <AdminLeaveApprovals />
+        ) : (
+          <Profile employee={employee} faceRegistered={false} onLogout={logout} />
+        )
+      ) : !storageReady && tab !== "profile" ? (
+        <View style={styles.center}>
+          <ActivityIndicator size="large" color={BRAND.green} />
+          <Text style={styles.loadingText}>Loading attendance…</Text>
+        </View>
+      ) : storageError && tab !== "profile" ? (
+        <View style={styles.content}>
+          <View style={styles.errorCard}>
+            <View style={styles.errorIconWrap}>
+              <Ionicons name="alert-circle-outline" size={26} color={BRAND.danger} />
+            </View>
+            <Text style={styles.errorTitle}>Something went wrong</Text>
+            <Text style={styles.error}>{storageError}</Text>
+            <Button title="Retry loading" onPress={loadHistory} />
+          </View>
+        </View>
+      ) : tab === "home" ? (
+        <FrsReport
+          employee={employee}
+          now={now}
+          record={displayedRecord}
+          records={records}
+          faceStatus={faceStatus}
+          onRefreshFaceStatus={refreshFaceStatus}
+          onClockIn={() => openCamera("clockIn")}
+          onClockOut={() => openCamera("clockOut")}
+          onRegisterFace={() => openCamera("register")}
+        />
+      ) : tab === "history" ? (
+        <FrsHistory records={records} now={now} />
+      ) : tab === "apply" ? (
+        <ApplyLeaves
+          onApplied={() => {
+            setLeaveRefresh((value) => value + 1);
+            setTab("leaves");
+            setSidebarVisible(false);
+          }}
+        />
+      ) : tab === "leaves" ? (
+        <LeaveHistory refreshKey={leaveRefresh} />
+      ) : (
+        <Profile
+          employee={employee}
+          faceRegistered={faceRegistered}
+          faceStatus={faceStatus}
+          onLogout={logout}
+        />
+      )}
 
-      <Modal
+      <Sidebar
+        visible={sidebarVisible}
+        selected={tab}
+        employee={employee}
+        onClose={() => setSidebarVisible(false)}
+        onNavigate={selectTab}
+        onLogout={logout}
+      />
+
+      <FaceRecognition
         visible={action !== null}
-        animationType="slide"
-        onRequestClose={closeCamera}
-      >
-        <SafeAreaView style={styles.cameraScreen}>
-          <Text style={styles.cameraTitle}>{cameraTitle}</Text>
-          <Text style={styles.cameraHint}>
-            Keep your face centered and use good lighting.
-          </Text>
-
-          {action !== null && permission?.granted && (
-            <View style={styles.cameraContainer}>
-              <CameraView
-                ref={cameraRef}
-                style={styles.camera}
-                facing="front"
-                onCameraReady={() => setCameraReady(true)}
-                onMountError={() => {
-                  setCameraReady(false);
-                  Alert.alert(
-                    "Camera error",
-                    "Unable to open the camera. Close and try again."
-                  );
-                }}
-              />
-            </View>
-          )}
-
-          {busy && (
-            <View style={styles.processing}>
-              <ActivityIndicator size="large" color="#2563eb" />
-              <Text style={styles.subtitle}>
-                {action === "register"
-                  ? "Registering face..."
-                  : "Verifying face and saving attendance..."}
-              </Text>
-            </View>
-          )}
-
-          <Button
-            title={
-              busy
-                ? "Processing..."
-                : !cameraReady
-                ? "Starting camera..."
-                : action === "register"
-                ? "Capture & Register"
-                : "Capture & Verify"
-            }
-            onPress={captureAndSubmit}
-            disabled={busy || !cameraReady}
-          />
-          <Button
-            title="Cancel"
-            onPress={closeCamera}
-            disabled={busy}
-            secondary
-          />
-        </SafeAreaView>
-      </Modal>
+        action={action}
+        cameraRef={cameraRef}
+        permission={permission}
+        cameraReady={cameraReady}
+        busy={busy}
+        onReady={() => setCameraReady(true)}
+        onMountError={() => {
+          setCameraReady(false);
+          Alert.alert(
+            "Camera error",
+            "Unable to open the camera. Close and try again."
+          );
+        }}
+        onCapture={captureAndSubmit}
+        onCancel={closeCamera}
+        Button={Button}
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: "#f3f6fb" },
-  loginContainer: {
-    flexGrow: 1,
-    justifyContent: "center",
-    padding: 24,
+  screen: { flex: 1, backgroundColor: BRAND.bg },
+
+  /* Header */
+  header: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 14,
+    backgroundColor: BRAND.green,
   },
+  headerLeft: { flexDirection: "row", alignItems: "center", gap: 12, flex: 1 },
+  brandMark: {
+    width: 38,
+    height: 38,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.18)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  headerTitle: { color: "#fff", fontSize: 16, fontWeight: "800", letterSpacing: -0.2 },
+  headerSub: { color: "#bbf7d0", fontSize: 12, marginTop: 2, fontWeight: "600" },
+  headerRight: { flexDirection: "row", alignItems: "center", gap: 10 },
+  avatarMini: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: "rgba(255,255,255,0.22)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  avatarMiniText: { color: "#fff", fontWeight: "800", fontSize: 12 },
+  logoutBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.15)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  /* Tabs — wraps to next line when overflowing */
+  tabBarWrapper: {
+    backgroundColor: BRAND.green,
+    paddingBottom: 8,
+  },
+  tabsContainer: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    gap: 8,
+    alignItems: "center",
+  },
+  tab: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 22,
+    backgroundColor: "rgba(255,255,255,0.14)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.18)",
+    minHeight: 40,
+  },
+  activeTab: {
+    backgroundColor: "#ffffff",
+    borderColor: "#ffffff",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  tabText: { color: "#dcfce7", fontWeight: "700", fontSize: 13 },
+  activeTabText: { color: BRAND.green, fontWeight: "800" },
+
+  /* Single-tab sub header with back button */
+  subHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: BRAND.green,
+  },
+  backBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    backgroundColor: "rgba(255,255,255,0.15)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  subHeaderTitle: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "800",
+  },
+
+  /* Content */
+  content: { padding: 20, paddingBottom: 40 },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
+  loadingText: { color: BRAND.muted, fontSize: 13, fontWeight: "600" },
+
+  /* Error card */
+  errorCard: {
+    backgroundColor: "#fff",
+    padding: 22,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: "#fecaca",
+    alignItems: "center",
+  },
+  errorIconWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: "#fef2f2",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+  },
+  errorTitle: {
+    fontSize: 16,
+    fontWeight: "800",
+    color: BRAND.text,
+    marginBottom: 6,
+  },
+  error: { color: BRAND.danger, lineHeight: 22, textAlign: "center", fontSize: 13 },
+
+  /* Legacy bits kept for child components that may reference them */
+  loginContainer: { flexGrow: 1, justifyContent: "center", padding: 24 },
   logo: {
     width: 72,
     height: 72,
     borderRadius: 22,
-    backgroundColor: "#2563eb",
+    backgroundColor: BRAND.green,
     alignItems: "center",
     justifyContent: "center",
     alignSelf: "center",
@@ -718,11 +736,11 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 28,
     fontWeight: "800",
-    color: "#0f172a",
+    color: BRAND.text,
     textAlign: "center",
     marginBottom: 8,
   },
-  subtitle: { color: "#64748b", fontSize: 14, lineHeight: 21 },
+  subtitle: { color: BRAND.muted, fontSize: 14, lineHeight: 21 },
   card: {
     backgroundColor: "#fff",
     padding: 20,
@@ -734,73 +752,48 @@ const styles = StyleSheet.create({
   cardTitle: {
     fontSize: 17,
     fontWeight: "700",
-    color: "#0f172a",
+    color: BRAND.text,
     marginBottom: 10,
   },
-  label: { color: "#64748b", fontSize: 14, marginBottom: 7 },
+  label: { color: BRAND.muted, fontSize: 14, marginBottom: 7 },
   input: {
     borderWidth: 1,
     borderColor: "#cbd5e1",
     borderRadius: 12,
     padding: 14,
     fontSize: 16,
-    color: "#0f172a",
+    color: BRAND.text,
     marginBottom: 16,
     backgroundColor: "#f8fafc",
   },
   button: {
     padding: 16,
-    backgroundColor: "#2563eb",
+    backgroundColor: BRAND.green,
     alignItems: "center",
     borderRadius: 12,
     marginTop: 12,
   },
   buttonText: { color: "#fff", fontSize: 16, fontWeight: "700" },
-  secondaryButton: { backgroundColor: "#eaf0ff" },
-  secondaryButtonText: { color: "#2563eb" },
-  dangerButton: { backgroundColor: "#dc2626" },
+  secondaryButton: { backgroundColor: BRAND.mint },
+  secondaryButtonText: { color: BRAND.green },
+  dangerButton: { backgroundColor: BRAND.danger },
   disabled: { opacity: 0.4 },
-  demo: {
-    textAlign: "center",
-    color: "#64748b",
-    marginTop: 18,
-    fontSize: 13,
-  },
-  header: {
-    padding: 20,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  headerTitle: { fontSize: 21, fontWeight: "800", color: "#0f172a" },
-  logout: { color: "#dc2626", fontWeight: "700", padding: 8 },
-  tabs: {
-    flexDirection: "row",
-    backgroundColor: "#e2e8f0",
-    marginHorizontal: 20,
-    padding: 4,
-    borderRadius: 12,
-  },
-  tab: { flex: 1, padding: 12, alignItems: "center", borderRadius: 9 },
-  activeTab: { backgroundColor: "#fff" },
-  tabText: { color: "#64748b", fontWeight: "700" },
-  activeTabText: { color: "#2563eb" },
-  content: { padding: 20, paddingBottom: 40 },
-  welcome: { fontSize: 23, fontWeight: "800", color: "#0f172a" },
+  demo: { textAlign: "center", color: BRAND.muted, marginTop: 18, fontSize: 13 },
+  welcome: { fontSize: 23, fontWeight: "800", color: BRAND.text },
   clockCard: {
-    backgroundColor: "#1d4ed8",
+    backgroundColor: BRAND.green,
     borderRadius: 20,
     padding: 24,
     marginTop: 20,
     alignItems: "center",
   },
-  clockLabel: { color: "#bfdbfe", fontSize: 12, letterSpacing: 2 },
+  clockLabel: { color: "#bbf7d0", fontSize: 12, letterSpacing: 2 },
   clock: { color: "#fff", fontSize: 40, fontWeight: "800", marginVertical: 8 },
-  clockStatus: { color: "#dbeafe", fontSize: 15 },
+  clockStatus: { color: "#dcfce7", fontSize: 15 },
   timeRow: { flexDirection: "row", marginVertical: 10 },
   timeColumn: { flex: 1 },
-  timeValue: { color: "#0f172a", fontWeight: "800", fontSize: 23 },
-  duration: { color: "#2563eb", fontWeight: "700", marginTop: 12 },
+  timeValue: { color: BRAND.text, fontWeight: "800", fontSize: 23 },
+  duration: { color: BRAND.green, fontWeight: "700", marginTop: 12 },
   historyHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -821,21 +814,25 @@ const styles = StyleSheet.create({
   historyLine: { color: "#475569", fontSize: 15, marginTop: 8 },
   messageBox: {
     padding: 16,
-    backgroundColor: "#e0e7ff",
+    backgroundColor: BRAND.mint,
     borderRadius: 12,
     marginTop: 18,
   },
-  messageText: { color: "#1e3a8a", lineHeight: 22 },
-  error: { color: "#b91c1c", lineHeight: 22 },
-  cameraScreen: { flex: 1, backgroundColor: "#f3f6fb", padding: 20 },
-  cameraTitle: { fontSize: 23, fontWeight: "800", color: "#0f172a" },
-  cameraHint: { color: "#64748b", marginTop: 8, marginBottom: 20 },
+  messageText: { color: BRAND.green, lineHeight: 22 },
+  cameraScreen: { flex: 1, backgroundColor: "#fbf5f3", padding: 20 },
+  cameraTitle: { fontSize: 23, fontWeight: "800", color: BRAND.text },
+  cameraHint: { color: BRAND.muted, marginTop: 8, marginBottom: 20 },
   cameraContainer: {
-    flex: 1,
     overflow: "hidden",
-    borderRadius: 24,
+    borderRadius: 400,
+    height: 300,
     backgroundColor: "#000",
   },
-  camera: { flex: 1 },
+  camera: {
+    flex: 1,
+    borderRadius: 24,
+    overflow: "hidden",
+    backgroundColor: "#000",
+  },
   processing: { alignItems: "center", paddingTop: 16, gap: 8 },
 });
