@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 // Set EXPO_PUBLIC_API_URL to your computer's LAN address before running Expo.
-export const API_URL = process.env.EXPO_PUBLIC_API_URL || "http://192.168.240.173:3001";
+export const API_URL =  "https://frs-backend-5.onrender.com";
 const TOKEN_KEY = "frs_session_token";
 
 export async function apiRequest(path, options = {}) {

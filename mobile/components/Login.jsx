@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Alert, ScrollView, Text, TextInput, TouchableOpacity, View } from "react-native";
-import { apiRequest, saveSession } from "./api";
+import { API_URL, apiRequest, saveSession } from "./api";
 import { common, palette } from "./CommonStyles";
 
 export default function Login({ onLogin }) {
@@ -12,6 +12,7 @@ export default function Login({ onLogin }) {
     setBusy(true);
     try {
       const result = await apiRequest("/api/auth/login", { method: "POST", body: JSON.stringify({ username, password }) });
+      console.log("api", API_URL);
       await saveSession(result.token, result.employee);
       onLogin(result.employee);
     } catch (error) { Alert.alert("Login failed", `${error.message}\n\nEmployee: employee / 123456\nAdmin: admin / admin123`); }
