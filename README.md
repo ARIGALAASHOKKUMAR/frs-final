@@ -35,6 +35,8 @@ EXPO_PUBLIC_API_URL=http://192.168.1.10:3001 npm start
 
 Replace `192.168.1.10` with your computer's LAN IP. A physical phone cannot reach the computer using `localhost`. The app's fallback address is the existing development address in `mobile/components/api.js`.
 
+Live face positioning and blink-to-capture use a native camera module. After installing mobile dependencies, rebuild and install the development app (`npx expo run:android` or `npx expo run:ios` from `mobile`); Expo Go does not include this module. The captured photo is then sent to the existing backend for face matching and attendance.
+
 ## Screens and API files
 
 Each screen lives in `mobile/components/`: `Splash.jsx`, `Login.jsx`, `FrsReport.jsx` (dashboard), `FrsHistory.jsx`, `FaceRecognition.jsx`, `ApplyLeaves.jsx`, `LeaveHistory.jsx`, `Profile.jsx`, `AdminDashboard.jsx`, `EmployeeManagement.jsx`, and `AdminLeaveApprovals.jsx`. `App.js` owns navigation and the existing camera/face-match flow. Shared colors and reusable styles are in `CommonStyles.js`; API calls are in `api.js`.

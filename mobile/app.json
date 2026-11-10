@@ -30,6 +30,10 @@
             "buildArchs": ["arm64-v8a"]
           }
         }
+      ],
+      [
+        "@rbayuokt/expo-face-vision",
+        { "cameraPermission": "Allow APFD-FRS to check face position and blink for attendance." }
       ]
     ]
   }

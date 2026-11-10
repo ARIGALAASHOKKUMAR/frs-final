@@ -15,6 +15,7 @@ import {
   SafeAreaView,
 } from "react-native-safe-area-context";
 import { useCameraPermissions } from "expo-camera";
+import * as ImageManipulator from "expo-image-manipulator";
 import { Ionicons } from "@expo/vector-icons";
 
 import Login from "./components/Login";
@@ -29,7 +30,7 @@ import AdminDashboard from "./components/AdminDashboard";
 import EmployeeManagement from "./components/EmployeeManagement";
 import AdminLeaveApprovals from "./components/AdminLeaveApprovals";
 import Splash from "./components/Splash";
-import { API_URL, apiRequest, clearSession, getSavedEmployee, getSessionToken } from "./components/api";
+import { API_URL, apiRequest, clearSession, getSessionToken } from "./components/api";
 
 const EMPLOYEE = { id: "EMP001", name: "Demo Employee" };
 
@@ -133,7 +134,6 @@ export default function App() {
 }
 
 function AttendanceApp() {
-  const cameraRef = useRef(null);
   const busyRef = useRef(false);
 
   const [permission, requestPermission] = useCameraPermissions();
@@ -161,29 +161,11 @@ function AttendanceApp() {
   useEffect(() => {
     const splashTimer = setTimeout(() => setShowSplash(false), 1400);
     const timer = setInterval(() => setNow(new Date()), 1000);
-    let active = true;
-    async function restoreSession() {
-      try {
-        const [token, savedEmployee] = await Promise.all([getSessionToken(), getSavedEmployee()]);
-        if (!active || !token || !savedEmployee) return;
-        setEmployee(savedEmployee);
-        setLoggedIn(true);
-        if (savedEmployee.role === "admin") {
-          setStorageReady(true);
-          setTab("admin-home");
-        } else {
-          setStorageReady(false);
-          setFaceStatus("loading");
-          loadHistory();
-          refreshFaceStatus();
-        }
-      } catch (error) {
-        console.warn("Could not restore saved session:", error.message);
-      }
-    }
-    restoreSession();
+    // Require a fresh sign-in each time the app process starts.
+    clearSession().catch((error) => {
+      console.warn("Could not clear the previous session:", error.message);
+    });
     return () => {
-      active = false;
       clearTimeout(splashTimer);
       clearInterval(timer);
     };
@@ -316,37 +298,48 @@ function AttendanceApp() {
     setCameraReady(false);
   }
 
-  async function captureAndSubmit() {
-    if (busyRef.current || !cameraReady || !cameraRef.current || !action) return;
+  async function captureAndSubmit(capturedPhoto) {
+    if (busyRef.current || !cameraReady || !action) return;
 
     busyRef.current = true;
     setBusy(true);
 
     const currentAction = action;
     let timeout;
+    let requestTimedOut = false;
 
     try {
-      const image = await cameraRef.current.takePictureAsync({
-        quality: 0.8,
-        base64: true,
-      });
-
-      if (!image?.base64)
+      if (!capturedPhoto?.uri)
         throw new Error("Unable to capture image. Please try again.");
+      const optimizedImage = await ImageManipulator.manipulateAsync(
+        capturedPhoto.uri,
+        [{ resize: { width: 640 } }],
+        {
+          compress: 0.68,
+          format: ImageManipulator.SaveFormat.JPEG,
+          base64: true,
+        }
+      );
+      const imageBase64 = optimizedImage.base64;
+      if (!imageBase64) throw new Error("Unable to read the captured face image.");
 
       const endpoint = currentAction === "register" ? "register" : "compare";
       const controller = new AbortController();
-      timeout = setTimeout(() => controller.abort(), 30000);
+      // Hosted development servers may need time to wake and load face models.
+      timeout = setTimeout(() => {
+        requestTimedOut = true;
+        controller.abort();
+      }, 120000);
       const token = await getSessionToken();
 
       const response = await fetch(`${API_URL}/api/face/${endpoint}`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
           Accept: "application/json",
+          "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ image: image.base64 }),
+        body: JSON.stringify({ image: imageBase64 }),
         signal: controller.signal,
       });
 
@@ -370,14 +363,14 @@ function AttendanceApp() {
           "Registration successful",
           data?.message || "You can now clock in using your face."
         );
-        return;
+        return true;
       }
 
       if (data?.matched !== true) {
         const text = "Face did not match. Attendance was not recorded.";
         setMessage(text);
         Alert.alert("Verification failed", text);
-        return;
+        return false;
       }
 
       const verifiedAt = new Date();
@@ -403,16 +396,18 @@ function AttendanceApp() {
       const text = `Face matched! ${label}`;
       setMessage(text);
       Alert.alert(`${label} successful`, text);
+      return true;
     } catch (error) {
       if (/already have an active clock-in|already been recorded today/i.test(error.message || "")) {
         await loadHistory();
       }
       const text =
-        error.name === "AbortError"
+        requestTimedOut || error.name === "AbortError"
           ? "The face API timed out. Please try again."
           : error.message || "Unable to connect to the backend.";
       setMessage(text);
       Alert.alert("Unable to complete action", text);
+      return false;
     } finally {
       clearTimeout(timeout);
       busyRef.current = false;
@@ -565,7 +560,6 @@ function AttendanceApp() {
       <FaceRecognition
         visible={action !== null}
         action={action}
-        cameraRef={cameraRef}
         permission={permission}
         cameraReady={cameraReady}
         busy={busy}
