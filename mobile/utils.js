@@ -1,1 +1,1 @@
-export const API_URL = "http://192.168.240.173:3001";
+export const API_URL = "https://frs-backend-5.onrender.com";
