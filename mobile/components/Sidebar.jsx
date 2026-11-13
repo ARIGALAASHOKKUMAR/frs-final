@@ -12,6 +12,7 @@ const EMPLOYEE_ITEMS = [
 const ADMIN_ITEMS = [
   ["admin-home", "Admin Dashboard", "grid-outline"],
   ["employees", "Manage Employees", "people-outline"],
+  ["admin-attendance", "Attendance History", "time-outline"],
   ["leave-approvals", "Leave Approvals", "checkmark-done-outline"],
   ["profile", "Profile", "person-outline"],
 ];

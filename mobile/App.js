@@ -29,6 +29,7 @@ import Profile from "./components/Profile";
 import AdminDashboard from "./components/AdminDashboard";
 import EmployeeManagement from "./components/EmployeeManagement";
 import AdminLeaveApprovals from "./components/AdminLeaveApprovals";
+import AdminAttendanceHistory from "./components/AdminAttendanceHistory";
 import Splash from "./components/Splash";
 import { API_URL, apiRequest, clearSession, getSessionToken } from "./components/api";
 
@@ -161,12 +162,19 @@ function AttendanceApp() {
   useEffect(() => {
     const splashTimer = setTimeout(() => setShowSplash(false), 1400);
     const timer = setInterval(() => setNow(new Date()), 1000);
+    // Wake a sleeping hosted backend while the user signs in. Model loading is
+    // completed before the backend begins listening, so this also confirms readiness.
+    const warmup = new AbortController();
+    const warmupTimer = setTimeout(() => warmup.abort(), 10000);
+    fetch(API_URL, { signal: warmup.signal }).catch(() => {}).finally(() => clearTimeout(warmupTimer));
     // Require a fresh sign-in each time the app process starts.
     clearSession().catch((error) => {
       console.warn("Could not clear the previous session:", error.message);
     });
     return () => {
       clearTimeout(splashTimer);
+      clearTimeout(warmupTimer);
+      warmup.abort();
       clearInterval(timer);
     };
   }, []);
@@ -330,6 +338,8 @@ function AttendanceApp() {
         requestTimedOut = true;
         controller.abort();
       }, 120000);
+
+
       const token = await getSessionToken();
 
       const response = await fetch(`${API_URL}/api/face/${endpoint}`, {
@@ -491,9 +501,11 @@ function AttendanceApp() {
       {/* Content */}
       {employee?.role === "admin" ? (
         tab === "admin-home" ? (
-          <AdminDashboard onEmployees={() => selectTab("employees")} onLeaves={() => selectTab("leave-approvals")} />
+          <AdminDashboard onEmployees={() => selectTab("employees")} onLeaves={() => selectTab("leave-approvals")} onAttendance={() => selectTab("admin-attendance")} />
         ) : tab === "employees" ? (
           <EmployeeManagement />
+        ) : tab === "admin-attendance" ? (
+          <AdminAttendanceHistory />
         ) : tab === "leave-approvals" ? (
           <AdminLeaveApprovals />
         ) : (

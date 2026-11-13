@@ -91,11 +91,11 @@ initializeFaceData();
 async function loadModels() {
   console.log("Loading face recognition models...");
 
-  await faceapi.nets.ssdMobilenetv1.loadFromDisk(MODEL_PATH);
-
-  await faceapi.nets.faceLandmark68Net.loadFromDisk(MODEL_PATH);
-
-  await faceapi.nets.faceRecognitionNet.loadFromDisk(MODEL_PATH);
+  await Promise.all([
+    faceapi.nets.ssdMobilenetv1.loadFromDisk(MODEL_PATH),
+    faceapi.nets.faceLandmark68Net.loadFromDisk(MODEL_PATH),
+    faceapi.nets.faceRecognitionNet.loadFromDisk(MODEL_PATH),
+  ]);
 
   modelsLoaded = true;
 
