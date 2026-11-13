@@ -1,14 +1,13 @@
 import React, { useState } from "react";
 import {
   Alert,
-  Platform,
   ScrollView,
   Text,
   TextInput,
   TouchableOpacity,
   View,
 } from "react-native";
-import DateTimePicker from "@react-native-community/datetimepicker";
+import { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import { apiRequest } from "./api";
 import { common, palette } from "./CommonStyles";
 
@@ -16,6 +15,8 @@ const LEAVE_TYPES = [
   { label: "Casual Leave", icon: "🌴" },
   { label: "Sick Leave", icon: "🤒" },
   { label: "Earned Leave", icon: "🏆" },
+  { label: "Work From Home", icon: "🏠" },
+  { label: "Attendance Regularization", icon: "📝" },
 ];
 
 const LEAVE_BALANCE_DAYS = 18;
@@ -36,6 +37,12 @@ function toISODate(d) {
   return `${y}-${m}-${day}`;
 }
 
+function fromISODate(value) {
+  if (!value) return null;
+  const [year, month, day] = value.split("-").map(Number);
+  return new Date(year, month - 1, day, 12);
+}
+
 function formatDisplay(d) {
   if (!d) return "";
   const months = [
@@ -48,15 +55,16 @@ function formatDisplay(d) {
 // ---------- inline DateField ----------
 
 function DateField({ label, value, onChange, minimumDate }) {
-  const [show, setShow] = useState(false);
-
-  function handleChange(event, date) {
-    if (Platform.OS === "android") {
-      setShow(false);
-      if (event.type === "dismissed") return;
-    }
-    if (date) onChange(date);
-    if (Platform.OS === "ios") setShow(false);
+  function openPicker() {
+    DateTimePickerAndroid.open({
+      value: value || minimumDate || new Date(),
+      mode: "date",
+      display: "calendar",
+      ...(minimumDate ? { minimumDate } : {}),
+      onValueChange: (_event, date) => {
+        if (date) onChange(new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12));
+      },
+    });
   }
 
   return (
@@ -64,7 +72,7 @@ function DateField({ label, value, onChange, minimumDate }) {
       <Text style={common.label}>{label}</Text>
       <TouchableOpacity
         style={[common.input, { justifyContent: "center" }]}
-        onPress={() => setShow(true)}
+        onPress={openPicker}
         activeOpacity={0.7}
       >
         <Text style={{ color: value ? palette.text : (palette.muted || "#888") }}>
@@ -72,34 +80,24 @@ function DateField({ label, value, onChange, minimumDate }) {
         </Text>
       </TouchableOpacity>
 
-      {show && (
-        <DateTimePicker
-          value={value || minimumDate || new Date()}
-          mode="date"
-          display={Platform.OS === "ios" ? "spinner" : "default"}
-          minimumDate={minimumDate}
-          onChange={handleChange}
-        />
-      )}
     </View>
   );
 }
 
 // ---------- main component ----------
 
-export default function ApplyLeaves({ onApplied }) {
-  const [type, setType] = useState("Casual Leave");
-  const [from, setFrom] = useState(null);
-  const [to, setTo] = useState(null);
+export default function ApplyLeaves({ onApplied, initialType, initialDate, regularizationOnly = false, leaveOnly = false }) {
+  const [type, setType] = useState(initialType || "Casual Leave");
+  const [from, setFrom] = useState(() => fromISODate(initialDate));
+  const [to, setTo] = useState(() => fromISODate(initialDate));
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
   const rangeValid = !!(from && to && to >= from);
   const requestedDays = rangeValid ? daysBetween(from, to) : 0;
-  const overBalance = requestedDays > LEAVE_BALANCE_DAYS;
+  const specialRequest = type === "Work From Home" || type === "Attendance Regularization";
+  const overBalance = !specialRequest && requestedDays > LEAVE_BALANCE_DAYS;
+  const visibleLeaveTypes = leaveOnly ? LEAVE_TYPES.filter((item) => !["Work From Home", "Attendance Regularization"].includes(item.label)) : LEAVE_TYPES;
   const reasonValid = reason.trim().length >= 3;
   const canSubmit = rangeValid && reasonValid && !busy && !overBalance;
 
@@ -109,9 +107,6 @@ export default function ApplyLeaves({ onApplied }) {
     }
     if (to < from) {
       return Alert.alert("Invalid range", "To date cannot be before from date.");
-    }
-    if (from < today) {
-      return Alert.alert("Invalid date", "From date cannot be in the past.");
     }
     if (overBalance) {
       return Alert.alert(
@@ -137,7 +132,10 @@ export default function ApplyLeaves({ onApplied }) {
           reason: reason.trim(),
         }),
       });
-      Alert.alert("Leave applied", "Your leave request is pending approval.");
+      Alert.alert(
+        regularizationOnly ? "Regularization submitted" : "Leave request submitted",
+        "Your request is pending approval."
+      );
       onApplied?.();
     } catch (error) {
       Alert.alert("Unable to apply", error.message);
@@ -148,9 +146,9 @@ export default function ApplyLeaves({ onApplied }) {
 
   return (
     <ScrollView contentContainerStyle={common.content}>
-      <Text style={common.title}>Apply Leave</Text>
+      <Text style={common.title}>{regularizationOnly ? "Attendance Regularization" : "Apply Leave"}</Text>
 
-      <View
+      {!regularizationOnly && <View
         style={[
           common.card,
           { backgroundColor: palette.pale, flexDirection: "row", alignItems: "center" },
@@ -163,14 +161,19 @@ export default function ApplyLeaves({ onApplied }) {
             {LEAVE_BALANCE_DAYS} Days
           </Text>
         </View>
-      </View>
+      </View>}
 
       <View style={common.card}>
+        {regularizationOnly ? <View style={{ marginBottom: 16 }}>
+          <Text style={common.label}>Date to regularize</Text>
+          <Text style={{ color: palette.deep, fontWeight: "800", fontSize: 16 }}>{formatDisplay(from)}</Text>
+          <Text style={common.subtitle}>Enter the reason for the missed clock-out.</Text>
+        </View> : <>
         <Text style={common.label}>Leave Type</Text>
 
         {/* Compact leave-type row — smaller padding, smaller icon/text */}
         <View style={{ flexDirection: "row", justifyContent: "space-around" }}>
-          {LEAVE_TYPES.map((item) => {
+          {visibleLeaveTypes.map((item) => {
             const selected = type === item.label;
             return (
               <TouchableOpacity
@@ -192,7 +195,7 @@ export default function ApplyLeaves({ onApplied }) {
               >
                 <Text style={{ fontSize: 16, marginBottom: 2 }}>{item.icon}</Text>
                 <Text
-                  numberOfLines={1}
+                  numberOfLines={2}
                   style={{
                     color: selected ? "white" : palette.text,
                     fontWeight: "600",
@@ -214,14 +217,14 @@ export default function ApplyLeaves({ onApplied }) {
             setFrom(d);
             if (to && d && to < d) setTo(d);
           }}
-          minimumDate={today}
+          minimumDate={undefined}
         />
 
         <DateField
           label="To Date"
           value={to}
           onChange={setTo}
-          minimumDate={from || today}
+          minimumDate={from || null}
         />
 
         {rangeValid && (
@@ -237,6 +240,7 @@ export default function ApplyLeaves({ onApplied }) {
             {overBalance ? ` — exceeds ${LEAVE_BALANCE_DAYS}-day balance` : ""}
           </Text>
         )}
+        </>}
 
         <Text style={common.label}>Reason</Text>
         <TextInput
@@ -244,7 +248,7 @@ export default function ApplyLeaves({ onApplied }) {
           value={reason}
           onChangeText={setReason}
           multiline
-          placeholder="Enter reason"
+          placeholder={regularizationOnly ? "Explain why you missed clock-out" : "Enter reason"}
         />
 
         <TouchableOpacity
@@ -253,7 +257,7 @@ export default function ApplyLeaves({ onApplied }) {
           disabled={!canSubmit}
         >
           <Text style={common.buttonText}>
-            {busy ? "Submitting…" : "Apply Leave →"}
+            {busy ? "Submitting…" : regularizationOnly ? "Submit Regularization →" : "Apply Leave →"}
           </Text>
         </TouchableOpacity>
       </View>

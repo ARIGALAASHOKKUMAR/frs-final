@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { ActivityIndicator, ScrollView, Text, TouchableOpacity, View } from "react-native";
-import DateTimePicker from "@react-native-community/datetimepicker";
+import { DateTimePickerAndroid } from "@react-native-community/datetimepicker";
 import { apiRequest } from "./api";
 import { common, palette } from "./CommonStyles";
 
@@ -62,29 +62,28 @@ function AttendanceChart({ records, employees, employeeId, from, to }) {
   </View>;
 }
 
-function DateFilter({ label, value, onChange }) {
-  const [visible, setVisible] = useState(false);
-  const maxDate = new Date();
-  maxDate.setHours(23, 59, 59, 999);
-  const handleChange = (event, date) => {
-    if (event.type === "dismissed") {
-      setVisible(false);
-      return;
-    }
-    const picked = date || (event.nativeEvent?.timestamp ? new Date(event.nativeEvent.timestamp) : null);
-    if (!picked) return;
-    // Read the native picker date as local calendar fields; converting through
-    // UTC can shift a selected day on devices outside UTC.
-    const localDate = new Date(picked.getFullYear(), picked.getMonth(), picked.getDate(), 12);
-    onChange(iso(localDate));
-    setVisible(false);
+function DateFilter({ label, value, onChange, minimumDate, maximumDate }) {
+  const openPicker = () => {
+    const todayLimit = new Date();
+    todayLimit.setHours(23, 59, 59, 999);
+    DateTimePickerAndroid.open({
+      value: dateFromKey(value),
+      mode: "date",
+      display: "calendar",
+      minimumDate: minimumDate || MIN_DATE,
+      maximumDate: maximumDate && maximumDate < todayLimit ? maximumDate : todayLimit,
+      onValueChange: (_event, date) => {
+        if (!date) return;
+        // Keep the device's selected calendar day; don't round-trip via UTC.
+        onChange(iso(new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12)));
+      },
+    });
   };
   return <View style={{ flex: 1 }}>
     <Text style={common.label}>{label}</Text>
-    <TouchableOpacity style={[common.input, { justifyContent: "center" }]} onPress={() => setVisible(true)}>
+    <TouchableOpacity style={[common.input, { justifyContent: "center" }]} onPress={openPicker}>
       <Text style={{ color: value ? palette.text : palette.muted }}>{value ? displayDate(value) : "Any date"}</Text>
     </TouchableOpacity>
-    {visible && <DateTimePicker value={dateFromKey(value)} mode="date" display="default" minimumDate={MIN_DATE} maximumDate={maxDate} onChange={handleChange} />}
   </View>;
 }
 
@@ -116,7 +115,10 @@ export default function AdminAttendanceHistory() {
     <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginBottom: 12 }}>
       {[{ id: "", name: "All employees" }, ...employees].map((employee) => <TouchableOpacity key={employee.id || "all"} onPress={() => setEmployeeId(employee.id)} style={{ paddingHorizontal: 13, paddingVertical: 10, marginRight: 8, borderRadius: 20, backgroundColor: employeeId === employee.id ? palette.green : "#e8eee9" }}><Text style={{ color: employeeId === employee.id ? "#fff" : palette.deep, fontWeight: "700" }}>{employee.name}</Text></TouchableOpacity>)}
     </ScrollView>
-    <View style={{ flexDirection: "row", gap: 10 }}><DateFilter label="From" value={from} onChange={setFrom} /><DateFilter label="To" value={to} onChange={setTo} /></View>
+    <View style={{ flexDirection: "row", gap: 10 }}>
+      <DateFilter label="From" value={from} maximumDate={to ? dateFromKey(to) : undefined} onChange={(date) => { setFrom(date); if (to && date > to) setTo(date); }} />
+      <DateFilter label="To" value={to} minimumDate={from ? dateFromKey(from) : undefined} onChange={setTo} />
+    </View>
     <TouchableOpacity style={common.button} onPress={() => { setEmployeeId(""); setFrom(""); setTo(""); }}><Text style={common.buttonText}>Clear filters</Text></TouchableOpacity>
     {!loading && !error && <AttendanceChart records={records} employees={employees} employeeId={employeeId} from={from} to={to} />}
     <Text style={[common.subtitle, { marginVertical: 12 }]}>{records.length} record(s)</Text>

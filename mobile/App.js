@@ -16,6 +16,7 @@ import {
 } from "react-native-safe-area-context";
 import { useCameraPermissions } from "expo-camera";
 import * as ImageManipulator from "expo-image-manipulator";
+import * as Location from "expo-location";
 import { Ionicons } from "@expo/vector-icons";
 
 import Login from "./components/Login";
@@ -154,6 +155,8 @@ function AttendanceApp() {
   const [now, setNow] = useState(new Date());
 
   const [action, setAction] = useState(null);
+  const [attendanceLocation, setAttendanceLocation] = useState(null);
+  const [requestPrefill, setRequestPrefill] = useState(null);
   const [cameraReady, setCameraReady] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -225,7 +228,7 @@ function AttendanceApp() {
   }
 
   const today = records.find((record) => record.date === dateKey(now));
-  const activeRecord = records.find((record) => !record.clockOut);
+  const activeRecord = records.find((record) => record.date === dateKey(now) && !record.clockOut);
   const displayedRecord = activeRecord || today;
 
   const canClockIn = storageReady && faceRegistered && !activeRecord && !today;
@@ -238,6 +241,8 @@ function AttendanceApp() {
       await clearSession();
       setRecords([]);
       setAction(null);
+      setAttendanceLocation(null);
+      setRequestPrefill(null);
       setLoggedIn(false);
       setTab("home");
       setSidebarVisible(false);
@@ -275,6 +280,34 @@ function AttendanceApp() {
       return;
     }
 
+    if (nextAction === "clockIn") {
+      try {
+        const eligibility = await apiRequest("/api/attendance/clock-in-eligibility");
+        if (!eligibility.eligible) {
+          const isMissedClockOut = eligibility.reason === "missed_clock_out";
+          Alert.alert(isMissedClockOut ? "Clock-out missed" : "No clock-in recorded", eligibility.message, [
+            { text: "Later", style: "cancel" },
+            {
+              text: isMissedClockOut ? "Regularize attendance" : "Apply leave",
+              onPress: () => {
+                setRequestPrefill({
+                  type: isMissedClockOut ? "Attendance Regularization" : "Casual Leave",
+                  date: eligibility.previousDate,
+                  regularizationOnly: isMissedClockOut,
+                  leaveOnly: !isMissedClockOut,
+                });
+                selectTab("apply");
+              },
+            },
+          ]);
+          return;
+        }
+      } catch (error) {
+        Alert.alert("Unable to check attendance", error.message);
+        return;
+      }
+    }
+
     try {
       const granted = permission?.granted
         ? permission
@@ -292,17 +325,41 @@ function AttendanceApp() {
         return;
       }
 
+      if (nextAction === "clockIn" || nextAction === "clockOut") {
+        const locationPermission = await Location.requestForegroundPermissionsAsync();
+        if (locationPermission.status !== "granted") {
+          Alert.alert("Location permission required", "Allow location access to confirm you are within 200 m of an approved office.", [
+            { text: "Cancel", style: "cancel" },
+            { text: "Open settings", onPress: () => Linking.openSettings() },
+          ]);
+          return;
+        }
+        const location = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        if (!Number.isFinite(location.coords.accuracy) || location.coords.accuracy > 200) {
+          Alert.alert("GPS signal is weak", "Move to an open area and try again when your location is more accurate.");
+          return;
+        }
+        setAttendanceLocation({
+          latitude: location.coords.latitude,
+          longitude: location.coords.longitude,
+          accuracy: location.coords.accuracy,
+        });
+      } else {
+        setAttendanceLocation(null);
+      }
+
       setCameraReady(false);
       setMessage("");
       setAction(nextAction);
     } catch {
-      Alert.alert("Camera error", "Unable to request camera permission.");
+      Alert.alert("Unable to start attendance", "Check the camera and location permissions, then try again.");
     }
   }
 
   function closeCamera() {
     if (busyRef.current) return;
     setAction(null);
+    setAttendanceLocation(null);
     setCameraReady(false);
   }
 
@@ -384,11 +441,26 @@ function AttendanceApp() {
       }
 
       const verifiedAt = new Date();
+      let locationToSubmit = attendanceLocation;
+      if (currentAction === "clockIn" || currentAction === "clockOut") {
+        const freshLocation = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High });
+        if (!Number.isFinite(freshLocation.coords.accuracy) || freshLocation.coords.accuracy > 200) {
+          throw new Error("GPS accuracy is too low. Move to an open area and try again.");
+        }
+        locationToSubmit = {
+          latitude: freshLocation.coords.latitude,
+          longitude: freshLocation.coords.longitude,
+          accuracy: freshLocation.coords.accuracy,
+        };
+      }
       const attendance = await apiRequest(
         `/api/attendance/${
           currentAction === "clockIn" ? "clock-in" : "clock-out"
         }`,
-        { method: "POST", body: "{}" }
+        {
+          method: "POST",
+          body: JSON.stringify(currentAction === "clockIn" || currentAction === "clockOut" ? locationToSubmit : {}),
+        }
       );
       const saved = attendance.record;
       const updatedRecord = normalizeAttendanceRecord(saved);
@@ -401,9 +473,11 @@ function AttendanceApp() {
       setRecords(updatedRecords);
       setNow(verifiedAt);
       setAction(null);
+      setAttendanceLocation(null);
 
       const label = currentAction === "clockIn" ? "Clock-in" : "Clock-out";
-      const text = `Face matched! ${label}`;
+      const locationText = attendance.site ? ` at ${attendance.site} (${attendance.distanceMeters} m)` : "";
+      const text = `Face matched! ${label}${locationText}`;
       setMessage(text);
       Alert.alert(`${label} successful`, text);
       return true;
@@ -543,8 +617,13 @@ function AttendanceApp() {
         <FrsHistory records={records} now={now} />
       ) : tab === "apply" ? (
         <ApplyLeaves
+          initialType={requestPrefill?.type}
+          initialDate={requestPrefill?.date}
+          regularizationOnly={requestPrefill?.regularizationOnly}
+          leaveOnly={requestPrefill?.leaveOnly}
           onApplied={() => {
             setLeaveRefresh((value) => value + 1);
+            setRequestPrefill(null);
             setTab("leaves");
             setSidebarVisible(false);
           }}
